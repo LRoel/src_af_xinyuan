@@ -1,0 +1,189 @@
+#!/usr/bin/env python
+
+
+import rospy
+import serial
+import sys
+import struct
+import string
+import tf
+import Image
+import threading
+
+# cs = 0
+# css = 0
+
+# from std_msgs.msg import UInt8MultiArray
+from af_msgs.msg import RobotState
+from std_msgs.msg import Bool
+
+# def checksum(nmea_str0):
+#     nmea_str = nmea_str0[0:-5]
+#     return reduce(operator.xor, map(ord, nmea_str), 0)
+
+port = '/dev/ttyS1'
+
+try:
+    ser = serial.Serial(port=port, baudrate=115200, timeout=1)
+except serial.serialutil.SerialException:
+    print("not found at port " + port + ". Did you specify the correct port in the launch file?")
+    # exit
+    sys.exit(0)
+
+
+class ROBOT_STATE:
+    def __init__(self):
+        self.call_security_flag = 0
+        self.call_security_current = 0
+        self.call_security_old = 0
+        self.abnormal_detection_flag = 0
+        self.init_flag = 0
+        rospy.init_node('robot_state_node')
+        self.pub = rospy.Publisher('robot_state', RobotState, queue_size=100)
+        rospy.Subscriber('robot_state/abnormal_detection', RobotState, self.abnormal_detection_cb)
+        rospy.Subscriber('/cmd_vel/state', Bool, self.init_cb)
+        self.state = RobotState()
+        self.listener = tf.TransformListener()
+        t1 = threading.Thread(target=self.serial_process)
+        t2 = threading.Thread(target=self.deviation_path)
+        t1.start()
+        t2.start()
+
+    def init_cb(self, init_state):
+        self.init_flag = init_state.data
+
+    def abnormal_detection_cb(self, robot_state):
+        # print "ok!!!"
+        self.state.abnormal_detection = robot_state.abnormal_detection
+
+    def deviation_path(self):
+        rate = rospy.Rate(100)  # 10hz
+        im = Image.open('/home/ros/catkin_ws/src/af_nav/maps/0309g.pgm')
+        while not rospy.is_shutdown():
+            try:
+                (trans, rot) = self.listener.lookupTransform('/map', '/base_footprint', rospy.Time(0))
+            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+                trans = (0, 0, 0)
+            map_origin_x = -66.74070434570314
+            map_origin_y = -28.52960510253905
+            map_resolution = 0.050000
+            grid_x = int((trans[0] - map_origin_x) / map_resolution)
+            grid_y = int((trans[1] - map_origin_y) / map_resolution)
+            pixel = im.getpixel((grid_x, 5312 - grid_y))
+            # print grid_x,grid_y,pixel
+            if pixel != 255:
+                self.state.deviation_path = True
+            else:
+                self.state.deviation_path = False
+            rate.sleep()
+
+    def serial_process(self):
+        rate = rospy.Rate(100)
+        while not rospy.is_shutdown():
+            self.state.header.stamp = rospy.Time.now()
+            # print self.state
+            # self.publish()
+            self.pub.publish(self.state)
+            ser_data = ser.read(1)
+            if ser_data == '\x85':
+                # print "85"
+                if ser.read(1) == '\x16':
+                    s = ser.read(21)
+                    if len(s) == 21:
+                        data = struct.unpack(">10HB", s)
+                        sonar = data[0:10]
+                        cs = data[-1]
+                        css_tmp = struct.unpack(">21B", s)
+                        css = sum(css_tmp[0:-1]) & 0xff
+                        if cs == css:
+                            self.state.sonar = sonar
+                            # print "pub sonar succeed, sonar",sonar
+                else:
+                    continue
+            elif ser_data == '\x87':
+                # print "87"
+                if ser.read(1) == '\x09':
+                    s = ser.read(8)
+                    # print s
+                    if (len(s) == 8):
+                        data = struct.unpack("<HBHHB", s)
+                        voltage = data[0]
+                        electric_quantity = data[1]
+                        charge_current = data[2]
+                        discharge_current = data[3]
+                        cs = data[-1]
+                        css_tmp = struct.unpack(">8B", s)
+                        css = sum(css_tmp[0:-1]) & 0xff
+
+                        if (cs == css):
+                            self.state.voltage = voltage
+                            self.state.electric_quantity = electric_quantity
+                            self.state.charge_current = charge_current
+                            self.state.discharge_current = discharge_current
+                            # print ("pub voltage succeed, voltage = %d, electric_quantity = %d, charge_current = %d,discharge_current = %d" % (voltage, electric_quantity, charge_current, discharge_current))
+                else:
+                    continue
+            elif ser_data == '\x88':
+                # print "88"
+                if ser.read(1) == '\x06':
+                    s = ser.read(5)
+                    # print s
+                    if (len(s) == 5):
+                        data = struct.unpack("<IB", s)
+                        # print data
+                        cs = data[-1]
+                        css_tmp = struct.unpack(">5B", s)
+                        css = sum(css_tmp[0:-1]) & 0xff
+                        if (cs == css):
+                            error_state = bin(data[0])
+                            error_list = list(error_state[2:])
+                            error_list.reverse()
+                            error_list = map(int, error_list)
+                            self.call_security_current = error_list[10]
+                            
+                            if self.call_security_current and not self.call_security_old:
+                                self.call_security_flag = not self.call_security_flag
+                            # print self.call_security_current, self.call_security_flag
+                            self.state.vibration_detection = error_list[13]
+                            self.state.control_lost = error_list[12]
+                            self.state.emergency_stop = error_list[11]
+                            self.state.call_security = self.call_security_flag
+                            self.state.sonar_errors = error_list[9]
+                            self.state.front_collision = error_list[8]
+                            self.state.back_infrared = error_list[7]
+                            self.state.front_infrared = error_list[6]
+                            self.state.motor_4_lost = error_list[5]
+                            self.state.motor_3_lost = error_list[4]
+                            self.state.motor_2_lost = error_list[3]
+                            self.state.motor_1_lost = error_list[2]
+                            self.state.ros_lost = error_list[1]
+                            self.state.remote_lost = error_list[0]
+                            if sum(error_list[2:6]) != 0:
+                                self.state.error = True
+                            else:
+                                self.state.error = False
+                            self.state.error_status = "%8x" % data[0]
+                            # print "pub state succeed, %8x" % data[0]
+                            self.call_security_old = self.call_security_current
+                else:
+                    continue
+            else:
+                continue
+            # print array
+            rate.sleep()
+
+    # def publish(self):
+        # self.pub.publish(self.state)
+
+def robot_state_publish():
+    s = ROBOT_STATE()
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    try:
+        robot_state_publish()
+    except rospy.ROSInterruptException:
+        pass
+
+

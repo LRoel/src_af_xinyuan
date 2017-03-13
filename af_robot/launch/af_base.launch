@@ -1,0 +1,8 @@
+<launch>
+
+  <node name="af_serial" pkg="af_bringup" type="af_serial_node" />
+  <node name="af_gps_imu" pkg="af_bringup" type="gps_232.py" />
+  <node name="af_imu_encode" pkg="af_bringup" type="imu_encode.py" />
+  <node name="af_state_pub" pkg="af_bringup" type="robot_state.py" />
+
+</launch>

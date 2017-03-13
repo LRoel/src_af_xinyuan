@@ -1,0 +1,11 @@
+<launch>
+
+  <include file="$(find af_robot)/launch/af_bringup.launch" />
+  <include file="$(find af_nav)/launch/amcl_by_tf_switch.launch" />
+
+  <node pkg="af_robot" type="af_robot" name="af_robot" />
+  <node pkg="af_robot" type="af_path" name="af_path" />
+  <node pkg="af_robot" type="af_move" name="af_move" />
+  <node pkg="af_robot" type="af_android" name="af_android" /> 
+  <node pkg="af_robot" type="camera.py" name="camera" />
+</launch>
